@@ -18,7 +18,7 @@ export class RankingJob implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.rabbitmq.registerConsumer<RankingJobPayload>(
-      RANKING_QUEUE,
+      RANKING_QUEUE, //Consumer queue name
       (payload) => this.rankingService.processRankingJob(payload),
       { maxAttempts: 3, baseDelayMs: 2000 },
     );
