@@ -257,3 +257,39 @@ RabbitMQ-তে সাধারণত দুটি গুরুত্বপূ�
 >
 > **Exchange Message গ্রহণ করে → Queue-তে পাঠায় → Queue Job জমিয়ে রাখে → Consumer সেই Job নিয়ে কাজ সম্পন্ন করে।**
 
+
+
+
+
+
+
+
+
+
+
+দুটি method-এর call path বের করছি, তারপর Bangla-তে সংক্ষেপে “where / when / why” ব্যাখ্যা দেব। আগে কোথা থেকে invoke হচ্ছে সেটা নিশ্চিত করে নিই যাতে ভুল ধারণা না দিই।
+
+এখন worker/job files আর controller-এর endpoint গুলো দেখছি, যাতে trigger path আর purpose পরিষ্কারভাবে বলতে পারি। এরপর Bangla-তে সরাসরি map করে দেব।
+
+processRankingJob আর processRollJob দুটোই manual request থেকে সরাসরি না, বরং RabbitMQ worker-এর মাধ্যমে background-এ চলে। কোথায় ব্যবহার হয়, কখন চালু হয়, আর কেন আলাদা করা হয়েছে তা নিচে দিলাম।
+
+processRankingJob আছে ranking.service.ts:144, আর এটাকে worker হিসেবে register করা হয়েছে ranking.job.ts:1.
+processRollJob আছে ranking.service.ts:199, আর এটাকে worker হিসেবে register করা হয়েছে roll.job.ts:1.
+কবে চালু হয়:
+
+ইউজার POST /ranking/generate-roll মারলে controller থেকে ranking.controller.ts:21 → requestGenerate() → ranking queue-তে job যায় → তারপর RabbitMQ consumer processRankingJob() চালায়।
+ইউজার POST /ranking/recalculate মারলেও ranking.controller.ts:29 → requestRecalculate() → ranking queue-তে job যায় → processRankingJob() চালায়।
+processRankingJob() শেষ হলে এটা rollQueue.publish(...) করে, আর সেই roll queue-এর consumer processRollJob() চালায়।
+কেন ব্যবহার হয়:
+
+processRankingJob first step: studentদের combined ranking compute করে, তারপর ছোট payload (rankedList) roll queue-তে পাঠায়।
+processRollJob second step: ওই ranked list থেকে roll assign করে, history লেখে, lock বসায়, audit log করে।
+এই split করার কারণে কাজটা background-এ হয়, HTTP request block হয় না, retry/DLQ সহজ হয়, আর heavy calculation আর transactional roll assignment আলাদা থাকে।
+সংক্ষেপে flow:
+API request → requestGenerate/requestRecalculate → ranking queue → processRankingJob → roll queue → processRollJob
+
+আরও ছোট করে বললে:
+
+processRankingJob = ranking হিসাব করা
+processRollJob = roll assign + save + lock + audit করা
+চাইলে আমি এটা এখন Bangla flowchart আকারে ৫-৬ লাইনে দেখাতে পারি।
