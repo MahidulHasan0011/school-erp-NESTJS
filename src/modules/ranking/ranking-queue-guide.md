@@ -15,6 +15,7 @@ RabbitMQ দিয়ে ranking job চালানোর পুরো ফ্�
 | ট্রে ১ | `ranking.jobs` queue |
 | ট্রে ২ | `roll.jobs` queue |
 | পুরো অর্ডার সিস্টেম | RabbitMQ সার্ভার (`amqp://localhost:5672`) |
+| টেলিফোন লাইন (অনুবাদক) | `amqplib` — npm প্যাকেজ |
 | স্টোর বয় ১ | `job/ranking.job.ts` → `processRankingJob()` |
 | স্টোর বয় ২ | `job/roll.job.ts` → `processRollJob()` |
 | হাতের কাজ | `RankingEngine`, `RollEngine` |
@@ -247,6 +248,71 @@ Queue: ranking.jobs.dlq
 
 ---
 
+## ৪খ. `amqplib` — এই অনুবাদটা কে করে?
+
+উপরের ধাপ ৩ আর ধাপ ৫-এ object ↔ bytes অনুবাদ হলো। ওই কাজটা করে **`amqplib`** — npm প্যাকেজ (`package.json`)।
+
+**দোকানের উদাহরণে: টেলিফোন লাইন।** আপনি বাংলায় বলছেন, ওপাশে অর্ডার সিস্টেম নিজের কোড-ভাষায় শুনছে।
+
+```
+ranking.queue.ts / ranking.job.ts    ← amqplib-এর নামই জানে না
+        ↓
+RabbitMQService                       ← একমাত্র ফাইল: import * as amqp from 'amqplib'
+        ↓  amqplib (অনুবাদ)
+     TCP socket
+        ↓
+RabbitMQ সার্ভার (:5672)
+```
+
+পুরো প্রজেক্টে `amqplib` শুধু **একটা ফাইলে** import করা — `rabbitmq.service.ts`। ইচ্ছাকৃত: কাল Kafka-তে গেলে শুধু ওই ফাইলটাই বদলাবে।
+
+### কখন কী করে
+
+| কখন | `amqplib` যা করে |
+|---|---|
+| অ্যাপ চালু (একবার) | `connect()` → TCP লাইন খোলে · `createChannel()` · `assertQueue()` (ট্রে বানায়) · `consume()` (টিকিট নেয়) |
+| প্রতিবার publish | আপনার Buffer + header → AMQP ফ্রেম → তারে পাঠায় |
+| প্রতিবার push | AMQP ফ্রেম → `msg` object (`content`, `properties`, `fields`) |
+| কাজ শেষে | `ack()` / `nack()` তারে পাঠায় |
+| কিছু ভাঙলে | `on('close')` / `on('error')` event জানায় → কোড reconnect করে |
+
+### সবচেয়ে জরুরি কাজটা
+
+`amqplib` **নিজের ভেতরে একটা ম্যাপ রাখে** — `consumer tag → callback`:
+
+```
+RabbitMQ জানে:  "ctag-Xy9kL2m কে connection #3 এ পাঠাব"   ← শুধু ঠিকানা
+amqplib জানে:   "ctag-Xy9kL2m মানে এই callback"            ← আসল reference এখানে
+```
+
+তাই RabbitMQ-তে আপনার function-এর কোনো reference যায় না, নামও যায় না। সে জানেই না ওপাশে কী চলবে।
+
+### Connection বনাম Channel
+
+```
+Connection = একটাই TCP তার (দামি, একবার খোলা হয়)
+   └── Channel = ওই তারের ভেতরে হালকা "লেন" (সস্তা, অনেকগুলো বানানো যায়)
+```
+
+AMQP-তে একটা channel-এ error হলে **পুরো channel বন্ধ** হয়ে যায় — তাই কোডে তিনটা আলাদা:
+
+| channel | কাজ | কেন আলাদা |
+|---|---|---|
+| `pubChannel` (confirm) | সব publish | publish-এর error যেন consumer না মারে |
+| `subChannel` | consume + ack/nack | একটা ভুলে সব worker নীরবে মরত |
+| temp channel | DLQ peek/replay | admin কাজের error শুধু ওই কাজটাই ফেলবে |
+
+**`createConfirmChannel()` কেন?** সাধারণ channel-এ `publish()` সাথে সাথেই ফেরত আসে — broker পেল কি না জানা যায় না। confirm channel-এ broker ডিস্কে লিখে "পেয়েছি" বললে তবেই resolve হয়। তাই ২০২ বলার পর message হারানোর ঝুঁকি নেই।
+
+### দুইটা ভুল ধারণা
+
+- ❌ `amqplib` ব্যাকগ্রাউন্ডে লুপ চালিয়ে queue চেক করে
+  ✅ কিছুই করে না — শুধু socket-এ listener বসানো। message না এলে CPU খরচ **শূন্য**।
+- ❌ `amqplib` = RabbitMQ
+  ✅ `amqplib` শুধু client (আপনার প্রসেসে); RabbitMQ আলাদা সার্ভার, আলাদা প্রসেস।
+
+---
+
 ## ৫. দুইটা দিক গুলিয়ে ফেলবেন না
 
 ```
@@ -312,6 +378,7 @@ src/modules/ranking/
 
 src/common/rabbitmq/rabbitmq.service.ts
     publish / registerConsumer / handleMessage / retry / DLQ
+    ↑ পুরো প্রজেক্টে একমাত্র জায়গা যেখানে `amqplib` import করা
 ```
 
 ---
